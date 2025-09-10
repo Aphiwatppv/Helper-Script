@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Servers>
+  <Server>
+    <Id>2e02d25a-d0eb-42ef-a024-e7eaa1f287eb</Id>
+    <Location></Location>
+    <Instance></Instance>
+    <InstanceType></InstanceType>
+    <Username></Username>
+    <Password></Password>
+    <TNS></TNS>
+  </Server>
+  <Server>
+    <Id>8b412d35-96d8-47fe-98b9-4470bf2c4610</Id>
+    <Location></Location>
+    <Instance></Instance>
+    <InstanceType></InstanceType>
+    <Username></Username>
+    <Password></Password>
+    <TNS></TNS>
+  </Server>
+</Servers>
