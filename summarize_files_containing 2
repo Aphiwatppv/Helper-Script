@@ -1,0 +1,43 @@
+from collections import defaultdict
+
+def summarize_files_containing(
+    auth: SSHAuth,
+    remote_path: str,
+    substring: str,
+    *,
+    use_sudo: bool = False,
+    time_format: str = "%Y-%m-%d %H:%M:%S",
+) -> Dict[str, List[Dict]]:
+    """
+    Recursively search for files containing substring.
+    Summarize matches grouped by directory path.
+    Each entry keeps name, full path, size, and mtime (formatted).
+    """
+    if use_sudo and auth.sudo_user:
+        rows = list_remote_via_sudo(auth, remote_path, recursive=True, include_files=True, include_dirs=False)
+    else:
+        rows = list_remote(auth, remote_path, recursive=True, include_files=True, include_dirs=False)
+
+    grouped: Dict[str, List[Dict]] = defaultdict(list)
+    for r in rows:
+        if substring.lower() in r["name"].lower():
+            directory = "/".join(r["path"].split("/")[:-1]) or "/"
+            # format mtime nicely
+            if r["mtime"]:
+                mtime_str = r["mtime"].strftime(time_format)
+            else:
+                mtime_str = "-"
+            grouped[directory].append({
+                "name": r["name"],
+                "path": r["path"],
+                "size": r["size"],
+                "mtime": mtime_str,
+            })
+
+    return grouped
+results = summarize_files_containing(auth, "/var/log", "error", use_sudo=True)
+
+for directory, files in results.items():
+    print(f"\n{directory} → {len(files)} matches")
+    for f in files:
+        print(f"   {f['mtime']}  {f['size']:>10}  {f['path']}")
