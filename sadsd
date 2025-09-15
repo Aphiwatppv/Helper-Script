@@ -1,0 +1,237 @@
+
+# ssh_list.py
+from __future__ import annotations
+import paramiko
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Callable
+from fnmatch import fnmatch
+from datetime import datetime
+import json
+import shlex
+
+@dataclass
+class SSHAuth:
+    hostname: str
+    username: str
+    port: int = 22
+    password: Optional[str] = None              # Use this OR key_file
+    key_file: Optional[str] = None              # Path to OpenSSH private key (NOT .ppk)
+    key_passphrase: Optional[str] = None        # If your key is passphrase-protected
+    # known_hosts behavior
+    auto_add_host_key: bool = True
+    # sudo settings
+    sudo_user: Optional[str] = None             # e.g., "ebsdba" to run via: sudo -iu ebsdba
+    sudo_require_tty: bool = False              # set True if your sudoers needs a TTY
+
+def _connect(auth: SSHAuth) -> paramiko.SSHClient:
+    client = paramiko.SSHClient()
+    if auth.auto_add_host_key:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    else:
+        client.load_system_host_keys()
+    client.connect(
+        hostname=auth.hostname,
+        port=auth.port,
+        username=auth.username,
+        password=auth.password,
+        key_filename=auth.key_file,
+        passphrase=auth.key_passphrase,
+        look_for_keys=False,
+        allow_agent=False
+    )
+    return client
+
+# ------------------------------ SFTP path (preferred) ------------------------------
+
+def list_remote(
+    auth: SSHAuth,
+    remote_path: str,
+    *,
+    recursive: bool = False,
+    include_files: bool = True,
+    include_dirs: bool = False,
+    pattern: Optional[str] = None,   # e.g. "*.log" or "2025-*.csv"
+) -> List[Dict]:
+    """
+    List entries at remote_path via SFTP. Returns a list of dicts with metadata.
+    - recursive: walk subdirectories
+    - include_files / include_dirs: control which to include in results
+    - pattern: optional glob (applied to base name)
+    NOTE: SFTP cannot use sudo. To list as another user, use list_remote_via_sudo().
+    """
+    client = _connect(auth)
+    try:
+        sftp = client.open_sftp()
+        try:
+            results: List[Dict] = []
+            def _ls(path: str):
+                for attr in sftp.listdir_attr(path):
+                    name = attr.filename
+                    full_path = f"{path.rstrip('/')}/{name}"
+                    is_dir = _is_dir(sftp, full_path)
+                    if (pattern is None) or fnmatch(name, pattern):
+                        if (is_dir and include_dirs) or ((not is_dir) and include_files):
+                            results.append({
+                                "name": name,
+                                "path": full_path,
+                                "is_dir": is_dir,
+                                "size": attr.st_size,
+                                "mtime": datetime.fromtimestamp(attr.st_mtime),
+                                "mode": oct(attr.st_mode),
+                            })
+                    if recursive and is_dir:
+                        _ls(full_path)
+
+            _ls(remote_path)
+            results.sort(key=lambda r: (r["path"], r["name"]))
+            return results
+        finally:
+            sftp.close()
+    finally:
+        client.close()
+
+def _is_dir(sftp: paramiko.SFTPClient, path: str) -> bool:
+    import stat
+    try:
+        st = sftp.stat(path)
+        return stat.S_ISDIR(st.st_mode)
+    except IOError:
+        return False
+
+# ------------------------------ SUDO path (shell parsing) ------------------------------
+
+def list_remote_via_sudo(
+    auth: SSHAuth,
+    remote_path: str,
+    *,
+    recursive: bool = False,
+    include_files: bool = True,
+    include_dirs: bool = False,
+    pattern: Optional[str] = None,
+) -> List[Dict]:
+    """
+    List entries at remote_path by running a remote shell 'find' command under sudo -iu <user>.
+    This works even for protected paths, but returns parsed shell output (not SFTP attrs).
+    Requires auth.sudo_user to be set, and (if sudo prompts) auth.password must be provided.
+    """
+    if not auth.sudo_user:
+        raise ValueError("auth.sudo_user must be set to use list_remote_via_sudo()")
+
+    client = _connect(auth)
+    try:
+        # Use GNU find -printf to emit JSON-ish lines for robust parsing.
+        # Fields: type(%y), size(%s), mtime epoch(%T@), path(%p)
+        # -mindepth 1: to skip the root dir itself unless recursive=False and include_dirs=True
+        find_path = shlex.quote(remote_path)
+        find_cmd = f"find {find_path} {'-mindepth 1 ' if recursive else '-maxdepth 1 '} -printf '{{\"t\":\"%y\",\"s\":%s,\"m\":%T@,\"p\":\"%p\"}}\\n'"
+        sudo_prefix = f"sudo -iu {shlex.quote(auth.sudo_user)}"
+        # For shells where sudoers requires a login shell for env, wrap in bash -lc
+        full_cmd = f"{sudo_prefix} bash -lc {shlex.quote(find_cmd)}"
+
+        out, err, code = _sudo_exec(client, full_cmd, auth)
+        if code != 0 and not out:
+            raise RuntimeError(f"sudo find failed (exit {code}): {err.strip()}")
+
+        results: List[Dict] = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                # Skip unparsable line
+                continue
+            is_dir = (rec.get("t") == "d")
+            name = rec.get("p", "").split("/")[-1]
+            if pattern and not fnmatch(name, pattern):
+                continue
+            if (is_dir and include_dirs) or ((not is_dir) and include_files):
+                # Convert epoch (float) to datetime
+                try:
+                    mtime = datetime.fromtimestamp(float(rec.get("m", 0.0)))
+                except Exception:
+                    mtime = None
+                results.append({
+                    "name": name,
+                    "path": rec.get("p"),
+                    "is_dir": is_dir,
+                    "size": int(rec.get("s", 0)),
+                    "mtime": mtime,
+                    "mode": None,  # not available from this method
+                })
+
+        results.sort(key=lambda r: (r["path"], r["name"]))
+        return results
+    finally:
+        client.close()
+
+def _sudo_exec(client: paramiko.SSHClient, cmd: str, auth: SSHAuth):
+    """
+    Execute a command possibly requiring sudo password.
+    Returns (stdout, stderr, exit_status).
+    If sudo prompts for a password, we write it to stdin.
+    """
+    if auth.sudo_require_tty:
+        # Allocate a PTY if sudo requires it (Defaults to vt100)
+        chan = client.get_transport().open_session()
+        chan.get_pty()
+        chan.exec_command(cmd)
+        if auth.password:
+            chan.send(auth.password + "\n")
+        stdout_data = []
+        stderr_data = []
+        while not chan.exit_status_ready():
+            if chan.recv_ready():
+                stdout_data.append(chan.recv(65536).decode())
+            if chan.recv_stderr_ready():
+                stderr_data.append(chan.recv_stderr(65536).decode())
+        # drain any remaining
+        while chan.recv_ready():
+            stdout_data.append(chan.recv(65536).decode())
+        while chan.recv_stderr_ready():
+            stderr_data.append(chan.recv_stderr(65536).decode())
+        code = chan.recv_exit_status()
+        return "".join(stdout_data), "".join(stderr_data), code
+    else:
+        stdin, stdout, stderr = client.exec_command(cmd)
+        if auth.password:
+            try:
+                stdin.write(auth.password + "\n")
+                stdin.flush()
+            except Exception:
+                pass
+        out = stdout.read().decode()
+        err = stderr.read().decode()
+        code = stdout.channel.recv_exit_status()
+        return out, err, code
+
+# ---- Example usage ----
+if __name__ == "__main__":
+    # 1) Normal SFTP (no sudo)
+    # auth = SSHAuth(hostname="your.server.com", username="your_user", password="your_password")
+    # rows = list_remote(auth, "/home/your_user/specific/folder", recursive=False)
+    # for r in rows:
+    #     print(f"{'[DIR]' if r['is_dir'] else '     '} {r['mtime']} {r['size']:>10} {r['path']}")
+
+    # 2) Sudo as another user (e.g., ebsdba) using shell find (works for protected paths)
+    auth = SSHAuth(
+        hostname="your.server.com",
+        username="your_normal_user",
+        password="your_password",          # needed if sudo prompts
+        sudo_user="ebsdba",                # run commands as this user
+        sudo_require_tty=False             # set True if /etc/sudoers requires tty
+    )
+
+    print("\n-- list via sudo (non-recursive) --")
+    rows = list_remote_via_sudo(auth, "/home/ebsdba", recursive=False, include_dirs=True)
+    for r in rows:
+        mtime = r['mtime'].isoformat(sep=' ', timespec='seconds') if r['mtime'] else "-"
+        kind = "[DIR]" if r["is_dir"] else "     "
+        print(f"{kind} {mtime} {r['size']:>10} {r['path']}")
+
+    print("\n-- via sudo + pattern='*.log' (recursive) --")
+    logs = list_remote_via_sudo(auth, "/var/log", recursive=True, include_dirs=False, pattern="*.log")
+    for r in logs[:20]:
+        mtime = r['mtime'].isoformat(sep=' ', timespec='seconds') if r['mtime'] else "-"
+        print(f"{mtime} {r['size']:>10} {r['path']}")
