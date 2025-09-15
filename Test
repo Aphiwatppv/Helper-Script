@@ -1,0 +1,20 @@
+from ssh_list import SSHAuth;
+
+if __name__ == "__main__":
+    # Choose ONE auth method:
+
+    # 1) Password auth
+    # auth = SSHAuth(hostname="your.server.com", username="your_user", password="your_password")
+
+    # 2) Key auth (OpenSSH key, NOT .ppk)
+    auth = SSHAuth(
+        hostname="your.server.com",
+        username="your_user",
+        key_file=r"C:\path\to\id_rsa",         # exported from PuTTYgen
+        key_passphrase=None                    # or "your_passphrase"
+    )
+
+    # List everything (non-recursive)
+    rows = list_remote(auth, "/home/your_user/specific/folder", recursive=False)
+    for r in rows:
+        print(f"{'[DIR]' if r['is_dir'] else '     '} {r['mtime']} {r['size']:>10} {r['path']}")
