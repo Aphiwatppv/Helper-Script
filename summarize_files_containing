@@ -1,0 +1,26 @@
+from collections import defaultdict
+
+def summarize_files_containing(
+    auth: SSHAuth,
+    remote_path: str,
+    substring: str,
+    *,
+    use_sudo: bool = False,
+) -> Dict[str, List[Dict]]:
+    """
+    Recursively search for files containing substring.
+    Summarize matches grouped by directory path.
+    Returns dict: {directory: [file_entries]}
+    """
+    if use_sudo and auth.sudo_user:
+        rows = list_remote_via_sudo(auth, remote_path, recursive=True, include_files=True, include_dirs=False)
+    else:
+        rows = list_remote(auth, remote_path, recursive=True, include_files=True, include_dirs=False)
+
+    grouped: Dict[str, List[Dict]] = defaultdict(list)
+    for r in rows:
+        if substring.lower() in r["name"].lower():
+            directory = "/".join(r["path"].split("/")[:-1]) or "/"
+            grouped[directory].append(r)
+
+    return grouped
