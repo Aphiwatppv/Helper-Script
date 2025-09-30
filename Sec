@@ -1,0 +1,49 @@
+import os
+import shutil
+
+def copy_target_subfolders(main_folder, backup_folder, parent_keyword, target_keywords):
+    """
+    Search inside main_folder for subfolders whose names contain parent_keyword,
+    then copy only their subfolders whose names contain any target_keyword
+    into backup_folder (flat).
+    
+    :param main_folder: The main folder path (e.g. PF540019)
+    :param backup_folder: Destination backup folder
+    :param parent_keyword: Keyword to identify parent folders (e.g. "PF540019")
+    :param target_keywords: List of keywords for subfolders you want (e.g. ["A","B","C"])
+    """
+    if not os.path.isdir(main_folder):
+        raise ValueError(f"Main folder not found: {main_folder}")
+
+    os.makedirs(backup_folder, exist_ok=True)
+
+    for root, dirs, files in os.walk(main_folder):
+        # look only at folders with parent_keyword
+        if parent_keyword in os.path.basename(root):
+            for d in os.listdir(root):
+                d_path = os.path.join(root, d)
+                if os.path.isdir(d_path):
+                    # check if folder name contains any target keyword
+                    if any(keyword in d for keyword in target_keywords):
+                        dest_path = os.path.join(backup_folder, d)
+                        # avoid overwrite: add suffix if needed
+                        if os.path.exists(dest_path):
+                            base, ext = os.path.splitext(d)
+                            i = 1
+                            while os.path.exists(os.path.join(backup_folder, f"{base}_{i}{ext}")):
+                                i += 1
+                            dest_path = os.path.join(backup_folder, f"{base}_{i}{ext}")
+                        shutil.copytree(d_path, dest_path)
+                        print(f"✅ Copied {d_path} -> {dest_path}")
+
+
+if __name__ == "__main__":
+    MAIN_FOLDER   = r"C:\Users\Deelom\Desktop\PF540019"
+    BACKUP_FOLDER = r"C:\Users\Deelom\Desktop\Backup"
+
+    # parent folders must contain this
+    PARENT_KEYWORD = "PF540019"
+    # target subfolders must contain one of these
+    TARGET_KEYWORDS = ["A", "B", "C"]
+
+    copy_target_subfolders(MAIN_FOLDER, BACKUP_FOLDER, PARENT_KEYWORD, TARGET_KEYWORDS)
