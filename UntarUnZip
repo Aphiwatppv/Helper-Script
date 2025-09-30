@@ -1,0 +1,100 @@
+import os
+import shutil
+from fnmatch import fnmatch
+
+def ensure_unique_path(base_dir: str, name: str) -> str:
+    """
+    Returns a path under base_dir using 'name'.
+    If it exists, appends _1, _2, ... to avoid overwriting.
+    """
+    candidate = os.path.join(base_dir, name)
+    if not os.path.exists(candidate):
+        return candidate
+    i = 1
+    while True:
+        alt = os.path.join(base_dir, f"{name}_{i}")
+        if not os.path.exists(alt):
+            return alt
+        i += 1
+
+def copy_selected_subfolders(
+    main_folder: str,
+    backup_folder: str,
+    parent_keyword: str,
+    target_names_or_patterns: list[str],
+    match_mode: str = "auto"  # "auto" (wildcards allowed), "exact", or "contains"
+):
+    """
+    - main_folder: the PF540019 main folder
+    - backup_folder: where only the desired subfolders end up (flat)
+    - parent_keyword: text that must appear in the INTERMEDIATE folder names (e.g., "PF540019")
+    - target_names_or_patterns: list like ["A","B","C"] or with wildcards ["log*","*result*"]
+    - match_mode:
+        * "auto": patterns with * or ? use fnmatch, otherwise exact match
+        * "exact": names must match exactly
+        * "contains": name contains the given text
+    """
+    if not os.path.isdir(main_folder):
+        raise ValueError(f"Main folder not found: {main_folder}")
+
+    os.makedirs(backup_folder, exist_ok=True)
+
+    # Walk the main folder and find parent folders that contain parent_keyword in their name
+    for root, dirs, files in os.walk(main_folder):
+        # Only consider subfolders whose names contain parent_keyword
+        parent_dirs = [d for d in dirs if parent_keyword in d]
+        for p in parent_dirs:
+            parent_path = os.path.join(root, p)
+
+            # Look at the *immediate* subfolders of each matching parent folder
+            try:
+                for entry in os.scandir(parent_path):
+                    if not entry.is_dir():
+                        continue
+                    child_name = entry.name
+
+                    # Decide if this child_name is one of the targets
+                    def name_matches(t: str) -> bool:
+                        t = t.strip()
+                        if match_mode == "exact":
+                            return child_name == t
+                        elif match_mode == "contains":
+                            return t in child_name
+                        else:  # auto
+                            if ("*" in t) or ("?" in t):
+                                return fnmatch(child_name, t)
+                            return child_name == t
+
+                    if any(name_matches(t) for t in target_names_or_patterns):
+                        # Copy child folder into backup flat (avoid collisions)
+                        dest_path = ensure_unique_path(backup_folder, child_name)
+                        shutil.copytree(entry.path, dest_path)
+                        print(f"Copied: {entry.path} -> {dest_path}")
+            except PermissionError:
+                print(f"Skip (permission denied): {parent_path}")
+            except FileNotFoundError:
+                print(f"Skip (gone): {parent_path}")
+
+
+if __name__ == "__main__":
+    # === EDIT THESE ===
+    MAIN_FOLDER   = r"C:\Users\Deelom\Desktop\PF540019"
+    BACKUP_FOLDER = r"D:\Backup\PF540019"
+
+    # Parent folder names must contain this (e.g., PF540019_014_S11P_...):
+    PARENT_KEYWORD = "PF540019"
+
+    # The exact subfolders you want to extract (flat into BACKUP_FOLDER):
+    # Examples:
+    #   targets = ["A","B","C"]                 # exact names
+    #   targets = ["logfolder", "resultfolder"] # exact names
+    #   targets = ["log*", "*KLME*"]            # wildcards
+    targets = ["A", "B", "C"]
+
+    copy_selected_subfolders(
+        main_folder=MAIN_FOLDER,
+        backup_folder=BACKUP_FOLDER,
+        parent_keyword=PARENT_KEYWORD,
+        target_names_or_patterns=targets,
+        match_mode="auto"  # "auto" lets you mix exact and wildcard patterns
+    )
